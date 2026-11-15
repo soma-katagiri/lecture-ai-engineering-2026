@@ -20,7 +20,7 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -188,7 +188,12 @@ def build_test_model() -> FunctionModel:
 
 
 # ---------------------------------------------------------------- 採点と集計
-def judge_cases(agent: Agent, cases: list[dict], wait: float = 0.0) -> dict[str, dict]:
+def judge_cases(
+    agent: Agent,
+    cases: list[dict],
+    wait: float = 0.0,
+    on_result: Callable[[dict[str, dict]], None] | None = None,
+) -> dict[str, dict]:
     """評価セットを 1 件ずつ採点する。戻り値は id → {基準: {reason, verdict}}。"""
     verdicts: dict[str, dict] = {}
     print(f"採点中 {len(cases)} 件 ", end="", flush=True)
@@ -200,6 +205,8 @@ def judge_cases(agent: Agent, cases: list[dict], wait: float = 0.0) -> dict[str,
             "reason": "末尾（最後の行）に「第N回」があるかをコードで判定",
             "verdict": check_lecture_mark(case["answer"]),
         }
+        if on_result:
+            on_result(verdicts)
         print(".", end="", flush=True)
         if wait:
             time.sleep(wait)
@@ -321,6 +328,25 @@ def _rel(path: Path) -> Path:
     return path.relative_to(ROOT) if path.is_absolute() and path.is_relative_to(ROOT) else path
 
 
+def write_result(
+    path: Path,
+    model_name: str,
+    rubric_path: Path,
+    run_at: str,
+    verdicts: dict[str, dict],
+    summary: dict,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"model": model_name, "rubric": str(_rel(rubric_path)), "run_at": run_at,
+             "verdicts": verdicts, "summary": summary},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="評価セットを LLM に採点させ、人のラベルとの一致率を出す")
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES, help="評価セット（jsonl）")
@@ -365,8 +391,17 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[model] {model_name}  temperature=0  rubric={_rel(args.rubric)}")
 
     judge = build_judge(model, rubric)
+    run_at = datetime.now().isoformat(timespec="seconds")
+
+    def save_progress(verdicts: dict[str, dict]) -> None:
+        completed_cases = [case for case in cases if case["id"] in verdicts]
+        write_result(
+            args.out, model_name, args.rubric, run_at, verdicts,
+            summarize(completed_cases, verdicts, labels),
+        )
+
     try:
-        verdicts = judge_cases(judge, cases, wait=args.wait)
+        verdicts = judge_cases(judge, cases, wait=args.wait, on_result=save_progress)
     except ModelHTTPError as e:
         print("\n" + api_error_message(e.status_code, str(e.body)[:200]))
         raise SystemExit(1)
@@ -378,15 +413,7 @@ def main(argv: list[str] | None = None) -> None:
     summary = summarize(cases, verdicts, labels)
     print_summary(summary)
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(
-            {"model": model_name, "rubric": str(_rel(args.rubric)), "run_at": datetime.now().isoformat(timespec="seconds"),
-             "verdicts": verdicts, "summary": summary},
-            ensure_ascii=False, indent=2,
-        ),
-        encoding="utf-8",
-    )
+    write_result(args.out, model_name, args.rubric, run_at, verdicts, summary)
     print(f"\n→ {_rel(args.out)} に保存しました")
 
 

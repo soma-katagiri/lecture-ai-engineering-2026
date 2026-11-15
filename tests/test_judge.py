@@ -53,8 +53,11 @@ def test_judge_pipeline_with_fake_model():
     labels = load_labels(INSTRUCTOR_LABELS)
     agent = build_judge(build_test_model(), DEFAULT_RUBRIC.read_text(encoding="utf-8"))
 
-    verdicts = judge_cases(agent, cases)
+    progress = []
+    verdicts = judge_cases(agent, cases, on_result=lambda current: progress.append(tuple(current)))
     assert set(verdicts) == {c["id"] for c in cases}
+    assert [len(ids) for ids in progress] == list(range(1, len(cases) + 1))
+    assert progress[-1] == tuple(c["id"] for c in cases)
     for v in verdicts.values():
         for key, _ in ALL_CRITERIA:
             assert v[key]["verdict"] in ("pass", "fail", "unsure")
